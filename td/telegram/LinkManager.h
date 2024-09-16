@@ -68,6 +68,8 @@ class LinkManager final : public Actor {
   void update_autologin_domains(vector<string> autologin_domains, vector<string> url_auth_domains,
                                 vector<string> whitelisted_domains);
 
+  void get_recent_me_urls(const string &referrer, Promise<td_api::object_ptr<td_api::tMeUrls>> &&promise);
+
   void get_deep_link_info(Slice link, Promise<td_api::object_ptr<td_api::deepLinkInfo>> &&promise);
 
   void get_external_link_info(string &&link, Promise<td_api::object_ptr<td_api::LoginUrlInfo>> &&promise);
@@ -83,6 +85,8 @@ class LinkManager final : public Actor {
 
   static Result<string> get_background_url(const string &name,
                                            td_api::object_ptr<td_api::BackgroundType> background_type);
+
+  static td_api::object_ptr<td_api::BackgroundType> get_background_type_object(const string &link, bool is_pattern);
 
   static string get_dialog_filter_invite_link_slug(Slice invite_link);
 
@@ -125,6 +129,7 @@ class LinkManager final : public Actor {
   class InternalLinkBotStart;
   class InternalLinkBotStartInGroup;
   class InternalLinkBusinessChat;
+  class InternalLinkBuyStars;
   class InternalLinkChangePhoneNumber;
   class InternalLinkConfirmPhone;
   class InternalLinkDefaultMessageAutoDeleteTimerSettings;

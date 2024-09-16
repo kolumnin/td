@@ -10,8 +10,10 @@
 #include "td/telegram/BackgroundType.h"
 #include "td/telegram/ChannelId.h"
 #include "td/telegram/ChannelType.h"
+#include "td/telegram/ChatManager.h"
 #include "td/telegram/ConfigManager.h"
 #include "td/telegram/DialogId.h"
+#include "td/telegram/DialogInviteLinkManager.h"
 #include "td/telegram/DialogManager.h"
 #include "td/telegram/DialogParticipant.h"
 #include "td/telegram/Global.h"
@@ -22,6 +24,7 @@
 #include "td/telegram/net/Proxy.h"
 #include "td/telegram/OptionManager.h"
 #include "td/telegram/ServerMessageId.h"
+#include "td/telegram/StickersManager.h"
 #include "td/telegram/StoryId.h"
 #include "td/telegram/Td.h"
 #include "td/telegram/TdDb.h"
@@ -394,6 +397,20 @@ class LinkManager::InternalLinkBusinessChat final : public InternalLink {
 
  public:
   explicit InternalLinkBusinessChat(string link_name) : link_name_(std::move(link_name)) {
+  }
+};
+
+class LinkManager::InternalLinkBuyStars final : public InternalLink {
+  int64 star_count_;
+  string purpose_;
+
+  td_api::object_ptr<td_api::InternalLinkType> get_internal_link_type_object() const final {
+    return td_api::make_object<td_api::internalLinkTypeBuyStars>(star_count_, purpose_);
+  }
+
+ public:
+  InternalLinkBuyStars(int64 star_count, const string &purpose)
+      : star_count_(clamp(star_count, static_cast<int64>(1), static_cast<int64>(1000000000000))), purpose_(purpose) {
   }
 };
 
@@ -831,6 +848,105 @@ class LinkManager::InternalLinkWebApp final : public InternalLink {
   }
 };
 
+class GetRecentMeUrlsQuery final : public Td::ResultHandler {
+  Promise<td_api::object_ptr<td_api::tMeUrls>> promise_;
+
+ public:
+  explicit GetRecentMeUrlsQuery(Promise<td_api::object_ptr<td_api::tMeUrls>> &&promise) : promise_(std::move(promise)) {
+  }
+
+  void send(const string &referrer) {
+    send_query(G()->net_query_creator().create(telegram_api::help_getRecentMeUrls(referrer)));
+  }
+
+  void on_result(BufferSlice packet) final {
+    auto result_ptr = fetch_result<telegram_api::help_getRecentMeUrls>(packet);
+    if (result_ptr.is_error()) {
+      return on_error(result_ptr.move_as_error());
+    }
+
+    auto urls_full = result_ptr.move_as_ok();
+    td_->user_manager_->on_get_users(std::move(urls_full->users_), "GetRecentMeUrlsQuery");
+    td_->chat_manager_->on_get_chats(std::move(urls_full->chats_), "GetRecentMeUrlsQuery");
+
+    auto urls = std::move(urls_full->urls_);
+    auto results = td_api::make_object<td_api::tMeUrls>();
+    results->urls_.reserve(urls.size());
+    for (auto &url_ptr : urls) {
+      CHECK(url_ptr != nullptr);
+      td_api::object_ptr<td_api::tMeUrl> result = td_api::make_object<td_api::tMeUrl>();
+      switch (url_ptr->get_id()) {
+        case telegram_api::recentMeUrlUser::ID: {
+          auto url = telegram_api::move_object_as<telegram_api::recentMeUrlUser>(url_ptr);
+          result->url_ = std::move(url->url_);
+          UserId user_id(url->user_id_);
+          if (!user_id.is_valid()) {
+            LOG(ERROR) << "Receive invalid " << user_id;
+            result = nullptr;
+            break;
+          }
+          result->type_ = td_api::make_object<td_api::tMeUrlTypeUser>(
+              td_->user_manager_->get_user_id_object(user_id, "tMeUrlTypeUser"));
+          break;
+        }
+        case telegram_api::recentMeUrlChat::ID: {
+          auto url = telegram_api::move_object_as<telegram_api::recentMeUrlChat>(url_ptr);
+          result->url_ = std::move(url->url_);
+          ChannelId channel_id(url->chat_id_);
+          if (!channel_id.is_valid()) {
+            LOG(ERROR) << "Receive invalid " << channel_id;
+            result = nullptr;
+            break;
+          }
+          result->type_ = td_api::make_object<td_api::tMeUrlTypeSupergroup>(
+              td_->chat_manager_->get_supergroup_id_object(channel_id, "tMeUrlTypeSupergroup"));
+          break;
+        }
+        case telegram_api::recentMeUrlChatInvite::ID: {
+          auto url = telegram_api::move_object_as<telegram_api::recentMeUrlChatInvite>(url_ptr);
+          result->url_ = std::move(url->url_);
+          td_->dialog_invite_link_manager_->on_get_dialog_invite_link_info(result->url_, std::move(url->chat_invite_),
+                                                                           Promise<Unit>());
+          auto info_object = td_->dialog_invite_link_manager_->get_chat_invite_link_info_object(result->url_);
+          if (info_object == nullptr) {
+            result = nullptr;
+            break;
+          }
+          result->type_ = td_api::make_object<td_api::tMeUrlTypeChatInvite>(std::move(info_object));
+          break;
+        }
+        case telegram_api::recentMeUrlStickerSet::ID: {
+          auto url = telegram_api::move_object_as<telegram_api::recentMeUrlStickerSet>(url_ptr);
+          result->url_ = std::move(url->url_);
+          auto sticker_set_id =
+              td_->stickers_manager_->on_get_sticker_set_covered(std::move(url->set_), false, "recentMeUrlStickerSet");
+          if (!sticker_set_id.is_valid()) {
+            LOG(ERROR) << "Receive invalid sticker set";
+            result = nullptr;
+            break;
+          }
+          result->type_ = td_api::make_object<td_api::tMeUrlTypeStickerSet>(sticker_set_id.get());
+          break;
+        }
+        case telegram_api::recentMeUrlUnknown::ID:
+          // skip
+          result = nullptr;
+          break;
+        default:
+          UNREACHABLE();
+      }
+      if (result != nullptr) {
+        results->urls_.push_back(std::move(result));
+      }
+    }
+    promise_.set_value(std::move(results));
+  }
+
+  void on_error(Status status) final {
+    promise_.set_error(std::move(status));
+  }
+};
+
 class GetDeepLinkInfoQuery final : public Td::ResultHandler {
   Promise<td_api::object_ptr<td_api::deepLinkInfo>> promise_;
 
@@ -1087,7 +1203,7 @@ Result<string> LinkManager::check_link_impl(Slice link, bool http_only, bool htt
       query.remove_prefix(1);
     }
     for (auto c : http_url.host_) {
-      if (!is_alnum(c) && c != '-' && c != '_') {
+      if (!is_alnum(c) && c != '-' && c != '_' && !(is_tonsite && c == '.')) {
         return Status::Error("Unallowed characters in URL host");
       }
     }
@@ -1545,6 +1661,12 @@ unique_ptr<LinkManager::InternalLink> LinkManager::parse_tg_link_query(Slice que
     // msg_url?url=<url>
     // msg_url?url=<url>&text=<text>
     return get_internal_link_message_draft(get_arg("url"), get_arg("text"));
+  } else if (path.size() == 1 && path[0] == "stars_topup") {
+    // stars_topup?balance=<star_count>&purpose=<purpose>
+    if (has_arg("balance")) {
+      return td::make_unique<InternalLinkBuyStars>(to_integer<int64>(url_query.get_arg("balance")),
+                                                   url_query.get_arg("purpose").str());
+    }
   }
   if (!path.empty() && !path[0].empty()) {
     return td::make_unique<InternalLinkUnknownDeepLink>(PSTRING() << "tg://" << query);
@@ -2095,6 +2217,16 @@ Result<string> LinkManager::get_internal_link_impl(const td_api::InternalLinkTyp
         return PSTRING() << get_t_me_url() << "m/" << url_encode(link->link_name_);
       }
     }
+    case td_api::internalLinkTypeBuyStars::ID: {
+      auto link = static_cast<const td_api::internalLinkTypeBuyStars *>(type_ptr);
+      if (!is_internal) {
+        return Status::Error("HTTP link is unavailable for the link type");
+      }
+      if (link->star_count_ <= 0) {
+        return Status::Error(400, "Invalid Telegram Star number provided");
+      }
+      return PSTRING() << "tg://stars_topup?balance=" << link->star_count_ << "&purpose=" << url_encode(link->purpose_);
+    }
     case td_api::internalLinkTypeChangePhoneNumber::ID:
       if (!is_internal) {
         return Status::Error("HTTP link is unavailable for the link type");
@@ -2506,6 +2638,10 @@ void LinkManager::update_autologin_domains(vector<string> autologin_domains, vec
   }
 }
 
+void LinkManager::get_recent_me_urls(const string &referrer, Promise<td_api::object_ptr<td_api::tMeUrls>> &&promise) {
+  td_->create_handler<GetRecentMeUrlsQuery>(std::move(promise))->send(referrer);
+}
+
 void LinkManager::get_deep_link_info(Slice link, Promise<td_api::object_ptr<td_api::deepLinkInfo>> &&promise) {
   Slice link_scheme("tg:");
   if (begins_with(link, link_scheme)) {
@@ -2652,6 +2788,30 @@ Result<string> LinkManager::get_background_url(const string &name,
     url += link;
   }
   return url;
+}
+
+td_api::object_ptr<td_api::BackgroundType> LinkManager::get_background_type_object(const string &link,
+                                                                                   bool is_pattern) {
+  auto parsed_link = parse_internal_link(link);
+  if (parsed_link == nullptr) {
+    return nullptr;
+  }
+  auto parsed_object = parsed_link->get_internal_link_type_object();
+  if (parsed_object->get_id() != td_api::internalLinkTypeBackground::ID) {
+    return nullptr;
+  }
+  auto background_name =
+      std::move(static_cast<td_api::internalLinkTypeBackground *>(parsed_object.get())->background_name_);
+  if (!BackgroundType::is_background_name_local(background_name)) {
+    BackgroundType type(false, is_pattern, nullptr);
+    type.apply_parameters_from_link(background_name);
+    return type.get_background_type_object();
+  }
+  auto r_background_type = BackgroundType::get_local_background_type(background_name);
+  if (r_background_type.is_error()) {
+    return nullptr;
+  }
+  return r_background_type.ok().get_background_type_object();
 }
 
 string LinkManager::get_dialog_filter_invite_link_slug(Slice invite_link) {

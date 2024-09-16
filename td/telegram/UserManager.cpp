@@ -41,7 +41,6 @@
 #include "td/telegram/MessagesManager.h"
 #include "td/telegram/MessageTtl.h"
 #include "td/telegram/misc.h"
-#include "td/telegram/net/NetQuery.h"
 #include "td/telegram/NotificationManager.h"
 #include "td/telegram/OnlineManager.h"
 #include "td/telegram/OptionManager.h"
@@ -1684,6 +1683,7 @@ void UserManager::UserFull::store(StorerT &storer) const {
   bool has_birthdate = !birthdate.is_empty();
   bool has_personal_channel_id = personal_channel_id.is_valid();
   bool has_flags2 = true;
+  bool has_privacy_policy_url = !privacy_policy_url.empty();
   BEGIN_STORE_FLAGS();
   STORE_FLAG(has_about);
   STORE_FLAG(is_blocked);
@@ -1719,6 +1719,7 @@ void UserManager::UserFull::store(StorerT &storer) const {
   if (has_flags2) {
     BEGIN_STORE_FLAGS();
     STORE_FLAG(has_preview_medias);
+    STORE_FLAG(has_privacy_policy_url);
     END_STORE_FLAGS();
   }
   if (has_about) {
@@ -1772,6 +1773,9 @@ void UserManager::UserFull::store(StorerT &storer) const {
   if (has_personal_channel_id) {
     store(personal_channel_id, storer);
   }
+  if (has_privacy_policy_url) {
+    store(privacy_policy_url, storer);
+  }
 }
 
 template <class ParserT>
@@ -1794,6 +1798,7 @@ void UserManager::UserFull::parse(ParserT &parser) {
   bool has_birthdate;
   bool has_personal_channel_id;
   bool has_flags2;
+  bool has_privacy_policy_url = false;
   BEGIN_PARSE_FLAGS();
   PARSE_FLAG(has_about);
   PARSE_FLAG(is_blocked);
@@ -1829,6 +1834,7 @@ void UserManager::UserFull::parse(ParserT &parser) {
   if (has_flags2) {
     BEGIN_PARSE_FLAGS();
     PARSE_FLAG(has_preview_medias);
+    PARSE_FLAG(has_privacy_policy_url);
     END_PARSE_FLAGS();
   }
   if (has_about) {
@@ -1881,6 +1887,9 @@ void UserManager::UserFull::parse(ParserT &parser) {
   }
   if (has_personal_channel_id) {
     parse(personal_channel_id, parser);
+  }
+  if (has_privacy_policy_url) {
+    parse(privacy_policy_url, parser);
   }
 }
 
@@ -3277,13 +3286,8 @@ void UserManager::on_update_user_full_common_chat_count(UserFull *user_full, Use
   }
 }
 
-void UserManager::on_update_user_location(UserId user_id, DialogLocation &&location) {
-  LOG(INFO) << "Receive " << location << " for " << user_id;
-  if (!user_id.is_valid()) {
-    LOG(ERROR) << "Receive invalid " << user_id;
-    return;
-  }
-
+void UserManager::on_update_my_user_location(DialogLocation &&location) {
+  auto user_id = get_my_id();
   UserFull *user_full = get_user_full_force(user_id, "on_update_user_location");
   if (user_full == nullptr) {
     return;
@@ -3299,13 +3303,8 @@ void UserManager::on_update_user_full_location(UserFull *user_full, UserId user_
   }
 }
 
-void UserManager::on_update_user_work_hours(UserId user_id, BusinessWorkHours &&work_hours) {
-  LOG(INFO) << "Receive " << work_hours << " for " << user_id;
-  if (!user_id.is_valid()) {
-    LOG(ERROR) << "Receive invalid " << user_id;
-    return;
-  }
-
+void UserManager::on_update_my_user_work_hours(BusinessWorkHours &&work_hours) {
+  auto user_id = get_my_id();
   UserFull *user_full = get_user_full_force(user_id, "on_update_user_work_hours");
   if (user_full == nullptr) {
     return;
@@ -3321,13 +3320,8 @@ void UserManager::on_update_user_full_work_hours(UserFull *user_full, UserId use
   }
 }
 
-void UserManager::on_update_user_away_message(UserId user_id, BusinessAwayMessage &&away_message) {
-  LOG(INFO) << "Receive " << away_message << " for " << user_id;
-  if (!user_id.is_valid()) {
-    LOG(ERROR) << "Receive invalid " << user_id;
-    return;
-  }
-
+void UserManager::on_update_my_user_away_message(BusinessAwayMessage &&away_message) {
+  auto user_id = get_my_id();
   UserFull *user_full = get_user_full_force(user_id, "on_update_user_away_message");
   if (user_full == nullptr) {
     return;
@@ -3348,13 +3342,8 @@ void UserManager::on_update_user_full_away_message(UserFull *user_full, UserId u
   }
 }
 
-void UserManager::on_update_user_greeting_message(UserId user_id, BusinessGreetingMessage &&greeting_message) {
-  LOG(INFO) << "Receive " << greeting_message << " for " << user_id;
-  if (!user_id.is_valid()) {
-    LOG(ERROR) << "Receive invalid " << user_id;
-    return;
-  }
-
+void UserManager::on_update_my_user_greeting_message(BusinessGreetingMessage &&greeting_message) {
+  auto user_id = get_my_id();
   UserFull *user_full = get_user_full_force(user_id, "on_update_user_greeting_message");
   if (user_full == nullptr) {
     return;
@@ -3375,13 +3364,8 @@ void UserManager::on_update_user_full_greeting_message(UserFull *user_full, User
   }
 }
 
-void UserManager::on_update_user_intro(UserId user_id, BusinessIntro &&intro) {
-  LOG(INFO) << "Receive " << intro << " for " << user_id;
-  if (!user_id.is_valid()) {
-    LOG(ERROR) << "Receive invalid " << user_id;
-    return;
-  }
-
+void UserManager::on_update_my_user_intro(BusinessIntro &&intro) {
+  auto user_id = get_my_id();
   UserFull *user_full = get_user_full_force(user_id, "on_update_user_intro");
   if (user_full == nullptr) {
     return;
@@ -4770,8 +4754,10 @@ void UserManager::send_update_profile_photo_query(UserId user_id, FileId file_id
                                                   Promise<Unit> &&promise) {
   TRY_STATUS_PROMISE(promise, G()->close_status());
   FileView file_view = td_->file_manager_->get_file_view(file_id);
+  const auto *main_remote_location = file_view.get_main_remote_location();
+  CHECK(main_remote_location != nullptr);
   td_->create_handler<UpdateProfilePhotoQuery>(std::move(promise))
-      ->send(user_id, file_id, old_photo_id, is_fallback, file_view.main_remote_location().as_input_photo());
+      ->send(user_id, file_id, old_photo_id, is_fallback, main_remote_location->as_input_photo());
 }
 
 void UserManager::upload_profile_photo(UserId user_id, FileId file_id, bool is_fallback, bool only_suggest,
@@ -4808,8 +4794,9 @@ void UserManager::on_upload_profile_photo(FileId file_id,
   LOG(INFO) << "Uploaded " << (is_animation ? "animated" : "static") << " profile photo " << file_id << " for "
             << user_id << " with reupload_count = " << reupload_count;
   FileView file_view = td_->file_manager_->get_file_view(file_id);
-  if (file_view.has_remote_location() && input_file == nullptr) {
-    if (file_view.main_remote_location().is_web()) {
+  const auto *main_remote_location = file_view.get_main_remote_location();
+  if (main_remote_location != nullptr && input_file == nullptr) {
+    if (main_remote_location->is_web()) {
       return promise.set_error(Status::Error(400, "Can't use web photo as profile photo"));
     }
     if (reupload_count == 3) {  // upload, ForceReupload repair file reference, reupload
@@ -4819,14 +4806,13 @@ void UserManager::on_upload_profile_photo(FileId file_id,
     // delete file reference and forcely reupload the file
     if (is_animation) {
       CHECK(file_view.get_type() == FileType::Animation);
-      LOG_CHECK(file_view.main_remote_location().is_common()) << file_view.main_remote_location();
+      LOG_CHECK(main_remote_location->is_common()) << *main_remote_location;
     } else {
       CHECK(file_view.get_type() == FileType::Photo);
-      LOG_CHECK(file_view.main_remote_location().is_photo()) << file_view.main_remote_location();
+      LOG_CHECK(main_remote_location->is_photo()) << *main_remote_location;
     }
-    auto file_reference =
-        is_animation ? FileManager::extract_file_reference(file_view.main_remote_location().as_input_document())
-                     : FileManager::extract_file_reference(file_view.main_remote_location().as_input_photo());
+    auto file_reference = is_animation ? FileManager::extract_file_reference(main_remote_location->as_input_document())
+                                       : FileManager::extract_file_reference(main_remote_location->as_input_photo());
     td_->file_manager_->delete_file_reference(file_id, file_reference);
     upload_profile_photo(user_id, file_id, is_fallback, only_suggest, is_animation, main_frame_timestamp,
                          std::move(promise), reupload_count + 1, {-1});
@@ -6971,6 +6957,11 @@ void UserManager::on_get_user_full(telegram_api::object_ptr<telegram_api::userFu
     on_update_user_full_commands(user_full, user_id, std::move(user->bot_info_->commands_));
     on_update_user_full_menu_button(user_full, user_id, std::move(user->bot_info_->menu_button_));
     on_update_user_full_has_preview_medias(user_full, user_id, std::move(user->bot_info_->has_preview_medias_));
+
+    if (user_full->privacy_policy_url != user->bot_info_->privacy_policy_url_) {
+      user_full->privacy_policy_url = std::move(user->bot_info_->privacy_policy_url_);
+      user_full->is_changed = true;
+    }
   }
   if (user_full->description != description) {
     user_full->description = std::move(description);
@@ -7249,6 +7240,7 @@ void UserManager::drop_user_full(UserId user_id) {
   user_full->birthdate = {};
   user_full->sponsored_enabled = false;
   user_full->has_preview_medias = false;
+  user_full->privacy_policy_url = string();
   user_full->is_changed = true;
 
   update_user_full(user_full, user_id, "drop_user_full");
@@ -7981,7 +7973,7 @@ td_api::object_ptr<td_api::userFullInfo> UserManager::get_user_full_info_object(
         user_full->about, user_full->description,
         get_photo_object(td_->file_manager_.get(), user_full->description_photo),
         td_->animations_manager_->get_animation_object(user_full->description_animation_file_id),
-        std::move(menu_button), std::move(commands),
+        std::move(menu_button), std::move(commands), user_full->privacy_policy_url,
         user_full->group_administrator_rights == AdministratorRights()
             ? nullptr
             : user_full->group_administrator_rights.get_chat_administrator_rights_object(),
